@@ -2,11 +2,10 @@ FROM alpine:latest
 
 MAINTAINER Alexander Olofsson <alexander.olofsson@liu.se>
 
-RUN apk update \
- && apk add \
+RUN apk add --no-cache \
       ruby ruby-dev ruby-etc ruby-json \
       git \
- && rm -f /var/cache/apk/* \
+ && mkdir /root/.cache \
  && gem install -N \
       rake ra10ke r10k
 
