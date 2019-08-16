@@ -1,0 +1,250 @@
+#!/usr/bin/env ruby
+
+require 'logger'
+
+class Puppetfile
+  attr_reader :filename,
+              :modules, :forge, :moduledir,
+              :errors, :warnings
+
+  attr_accessor :sort_mode, :access_token
+
+  def initialize(filename)
+    @filename = filename
+    @sort_mode = :combined
+    @modules = {}
+  end
+
+  def self.load!(filename)
+    file = Puppetfile.new(filename)
+    dsl = Puppetfile::DSL.new(file)
+    dsl.instance_eval(File.read(filename), filename)
+    file
+  end
+
+  def save(filename = self.filename)
+    File.open(filename, 'w') do |file|
+      file << "# -*- coding: utf-8; -*-\n"
+      file << "forge '#{forge}'\n" if forge
+      file << "moduledir '#{moduledir}'\n" if moduledir
+
+      file << "\n# Modules from the Puppet Forge\n"
+      file << modules
+              .select { |_name, data| data.is_a? String }
+              .map { |name, data| "mod '#{name}', '#{data}'" }
+              .join("\n")
+
+      file << "\n"
+
+      sources = Hash[modules
+                .select { |_name, data| data.is_a?(Hash) }
+                .group_by { |(_name, data)| URI(data.fetch(:git)).host }
+                .map { |k, v| [k, Hash[v]] }]
+
+      sources.each do |host, source_modules|
+        file << "\n# Modules from #{host}\n"
+        file << source_modules
+                .map do |name, data|
+                  data_map = data.sort_by { |k, _v| "#{'_' if k == :git}#{k}" }.map { |(k, v)| "#{k}: '#{v}'" }
+                  "mod '#{name}',\n    #{data_map.join ",\n    "}\n"
+                end
+                .join("\n")
+      end
+    end
+  end
+
+  def sort!
+    @modules = Hash[modules.sort_by do |k, _v|
+      if sort_mode == :split
+        k.to_s.sub('/', '-').split('-').last
+      elsif sort_mode == :combined
+        k.to_s.downcase
+      end
+    end]
+  end
+
+  def pin!
+    require 'cgi'
+    require 'json'
+    require 'net/http'
+    require 'uri'
+
+    modules
+      .select { |_name, data| data.is_a? Hash }
+      .each do |name, data|
+        repo = URI(data[:git])
+        branch = data[:branch] || data[:default_branch] || data[:ref]
+        commit = data[:commit] || data[:ref]
+
+        commit = nil if commit == branch
+
+        begin
+          repo.path.sub('.git', '') if repo.path.end_with? '.git'
+          repo_api = repo.dup.tap do |u|
+            u.path = "/api/v4/projects/#{CGI.escape u.path[1..-1].sub('.git', '')}/repository/branches/#{CGI.escape branch}"
+          end
+
+          branch_data = nil
+          logger.debug "Pinning #{name} against #{repo_api}"
+          Net::HTTP.start(repo_api.host, repo_api.port, use_ssl: repo_api.scheme == 'https') do |http|
+            request = Net::HTTP::Get.new repo_api
+            request['private-token'] = access_token if access_token
+            response = http.request request
+
+            response.value
+            branch_data = JSON.parse response.body, symbolize_names: true
+          end
+
+          logger.debug branch_data.inspect
+          commit = branch_data[:commit][:id]
+        rescue RuntimeError => ex
+          logger.fatal ex
+        end
+
+        data.delete :branch
+        data.delete :default_branch
+        data.delete :tag
+
+        data[:commit] = commit if commit
+        data[:ref] = branch
+      end
+  end
+
+  def add_module(name, map)
+    if @modules.key? name
+      logger.error "Duplicate module '#{name}'; first #{@modules[name]}, now #{map}"
+
+      @errors = 0 if @errors.nil?
+      @errors += 1
+    end
+    @modules[name] = map
+  end
+
+  def forge=(location)
+    unless @forge.nil?
+      logger.warn 'Overwriting Forge location'
+
+      @warnings = 0 if @warnings.nil?
+      @warnings += 1
+    end
+    @forge = location
+  end
+
+  def moduledir=(location)
+    unless @moduledir.nil?
+      logger.warn 'Overwriting Module location'
+
+      @warnings = 0 if @warnings.nil?
+      @warnings += 1
+    end
+    @moduledir = location
+  end
+
+  def logger
+    @logger ||= Logger.new(STDERR).tap do |l|
+      l.level = Logger::Severity::INFO
+    end
+  end
+
+  class DSL
+    # A barebones implementation of the Puppetfile DSL
+    #
+    # From https://github.com/puppetlabs/r10k/blob/master/lib/r10k/puppetfile.rb#L166-L190
+    #
+    # @api private
+
+    def initialize(librarian)
+      @librarian = librarian
+    end
+
+    def mod(name, args = nil)
+      @librarian.add_module(name, args)
+    end
+
+    def forge(location)
+      @librarian.forge = location
+    end
+
+    def moduledir(location)
+      @librarian.set_moduledir = location
+    end
+
+    # rubocop:disable Style/MethodMissing
+    def method_missing(method, *_args)
+      raise NoMethodError,
+            format("unrecognized declaration '%<method>s'", method: method)
+    end
+    # rubocop:enable Style/MethodMissing
+  end
+end
+
+USAGE = "Usage: #{$PROGRAM_NAME} Puppetfile [-hlps]".freeze
+if $PROGRAM_NAME == __FILE__
+  filename = ARGV.shift unless ARGV.empty?
+  actions = {}
+
+  until ARGV.empty?
+    arg = ARGV.shift
+
+    if arg.start_with? '--'
+      arg = arg.sub('--', '')
+
+      actions[:help] = true if arg == 'help'
+      actions[:sort] = true if arg == 'sort'
+      actions[:pin] = true if arg == 'pin'
+      actions[:lint] = true if arg == 'lint'
+    elsif arg.start_with? '-'
+      arg.each_char do |char|
+        next if char == '-'
+
+        actions[:help] = true if char == 'h'
+        actions[:sort] = true if char == 's'
+        actions[:pin] = true if char == 'p'
+        actions[:lint] = true if char == 'l'
+      end
+    end
+  end
+
+  if actions.empty? || actions[:help]
+    puts %(#{"Error: Missing Puppetfile name\n\n" unless filename}#{USAGE}
+
+Actions:
+  -h --help  Show this help
+  -l --lint  Lint the Puppetfile, report any mistakes
+  -p --pin   Pin the git refs to the last commit on all provided modules
+  -s --sort  Sort the module list in the Puppetfile
+)
+
+    exit !filename.nil?
+  end
+
+  file = Puppetfile.load! filename
+
+  modified = false
+  if actions[:pin]
+    unless File.exist? '.token'
+      puts %(Error: Pinning repos requires a .token file with an `api` level access token in it
+
+Create one from https://gitlab.it.liu.se/profile/personal_access_tokens
+)
+      exit false
+    end
+
+    file.access_token = File.read('.token').strip
+    file.pin!
+    modified = true
+  end
+
+  if actions[:sort]
+    file.sort!
+    modified = true
+  end
+
+  file.save if modified
+
+  if actions[:lint]
+    puts "#{file.filename}: #{file.errors || 0} errors, #{file.warnings || 0} warnings"
+
+    exit false unless file.errors.nil?
+  end
+end
