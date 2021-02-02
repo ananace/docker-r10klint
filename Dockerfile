@@ -7,7 +7,9 @@ RUN apk add --no-cache \
       git \
  && mkdir /root/.cache \
  && gem install -N \
-      rake ra10ke
+      rake ra10ke r10k rdoc \
+ && gem cleanup r10k \
+ && gem uninstall rdoc
 
 ADD puppetfile-update /bin
 
