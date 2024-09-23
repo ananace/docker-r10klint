@@ -5,21 +5,18 @@ stages:
 
 build:image:
   stage: build
-  image:
-    name: gcr.io/kaniko-project/executor:debug
-    entrypoint: []
+  image: quay.io/podman/stable
   script:
-    - mkdir -p /root/.docker
-    - echo "{\"auths\":{\"${CI_REGISTRY}\":{\"username\":\"${CI_REGISTRY_USER}\",\"password\":\"${CI_JOB_TOKEN}\"}}}" > /root/.docker/config.json
-    - /kaniko/executor --context ${CI_PROJECT_DIR} --dockerfile Dockerfile $DOCKER_PROXY --destination "${CI_REGISTRY_IMAGE}:latest"
+    - podman build --tag "$CI_REGISTRY_IMAGE" --file "${CI_PROJECT_DIR}/Dockerfile" $CI_PROJECT_DIR
+    - podman push --creds "${CI_REGISTRY_USER}:${CI_JOB_TOKEN}" "$CI_REGISTRY_IMAGE" "docker://${CI_REGISTRY_IMAGE}"
   only:
     - master
 
 promote:image:
   stage: promote
-  image: ananace/skopeo
+  image: quay.io/containers/skopeo
   script:
-    - /skopeo copy --src-creds "${CI_REGISTRY_USER}:${CI_JOB_TOKEN}" --dest-creds "${PROMOTE_USER}:${PROMOTE_PASS}" "docker://${CI_REGISTRY_IMAGE}:latest" "docker://${PROMOTE_IMAGE}:latest"
+    - skopeo copy --src-creds "${CI_REGISTRY_USER}:${CI_JOB_TOKEN}" --dest-creds "${PROMOTE_USER}:${PROMOTE_PASS}" "docker://${CI_REGISTRY_IMAGE}:latest" "docker://${PROMOTE_IMAGE}:latest"
   variables:
     GIT_STRATEGY: none
   only:

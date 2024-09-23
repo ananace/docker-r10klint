@@ -2,7 +2,7 @@ FROM alpine:latest
 
 MAINTAINER Alexander Olofsson <alexander.olofsson@liu.se>
 
-COPY ra10ke-1.0.0.gem /root/ra10ke.gem
+COPY ra10ke-3.1.0.gem /root/ra10ke.gem
 RUN apk add --no-cache \
       ruby ruby-dev ruby-etc ruby-json \
       git \
